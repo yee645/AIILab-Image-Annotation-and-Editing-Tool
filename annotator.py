@@ -14,7 +14,7 @@
   Shift+S     — 顯示目前所有已暫存的標記區間
   Ctrl+Z      — 復原上一筆標記區間
   Backspace   — 回到上一部影片
-  N           — 寫入 CSV 並載入下一部影片
+  N           — 載入下一部影片（暫存標記保留）
   Ctrl+E      — 將暫存區間匯出為剪輯影片（ffmpeg）
   Ctrl+Q      — 退出
 """
@@ -45,6 +45,7 @@ if sys.platform == "win32":
 FRAME_CACHE_MAX = 32
 DEFAULT_CSV_NAME = "annotation.csv"
 DEFAULT_IMAGE_FMT = "{filename}_{frame}_{us}.png"
+DEFAULT_EXPORT_FMT = "{filename}_seg{segment}.mkv"
 
 # ── 主題配色（科技風）─────────────────────────────────
 FONT_BTN = ("Consolas", 10, "bold")
@@ -222,6 +223,7 @@ class Annotator:
         self.output_folder = ""
         self.csv_name = DEFAULT_CSV_NAME
         self.image_format = DEFAULT_IMAGE_FMT
+        self.export_format = DEFAULT_EXPORT_FMT
         self.files = []
         self.file_idx = 0
         self.cap = None
@@ -264,6 +266,7 @@ class Annotator:
             self.output_folder = cfg.get("output_folder", "")
             self.csv_name = cfg.get("csv_name", DEFAULT_CSV_NAME)
             self.image_format = cfg.get("image_format", DEFAULT_IMAGE_FMT)
+            self.export_format = cfg.get("export_format", DEFAULT_EXPORT_FMT)
             _theme = cfg.get("theme", "light")
             self.theme_name = _theme if _theme in THEMES else "light"
         except Exception:
@@ -275,6 +278,7 @@ class Annotator:
             "output_folder": self.output_folder,
             "csv_name": self.csv_name,
             "image_format": self.image_format,
+            "export_format": self.export_format,
             "theme": self.theme_name,
         }
         try:
@@ -359,6 +363,11 @@ class Annotator:
             bg=t["btn_bg"], fg=t["btn_fg"],
             hover_bg=t["btn_hover"], active_bg=t["btn_active"],
             outline_color=ol, outer_bg=nc1)
+        self.btn_export_all = RoundedButton(
+            self.nav_cv, "Export All", self._export_all,
+            bg=t["btn_bg"], fg=t["btn_fg"],
+            hover_bg=t["btn_hover"], active_bg=t["btn_active"],
+            outline_color=ol, outer_bg=nc1)
         self.btn_theme = RoundedButton(
             self.nav_cv, t["toggle_label"], self._toggle_theme,
             bg=t["btn_bg"], fg=t["btn_fg"],
@@ -367,7 +376,7 @@ class Annotator:
 
         self._nw = []
         for btn in (self.btn_input, self.btn_output, self.btn_settings,
-                     self.btn_export):
+                     self.btn_export, self.btn_export_all):
             self._nw.append(
                 self.nav_cv.create_window(0, 10, window=btn, anchor="nw"))
         self._nw_toggle = self.nav_cv.create_window(
@@ -415,7 +424,7 @@ class Annotator:
         """重新排列導覽列按鈕位置（RWD）。"""
         x = 12
         btns = (self.btn_input, self.btn_output, self.btn_settings,
-                self.btn_export)
+                self.btn_export, self.btn_export_all)
         for i, btn in enumerate(btns):
             btn.update_idletasks()
             self.nav_cv.coords(self._nw[i], x, 10)
@@ -440,6 +449,7 @@ class Annotator:
                            (self.btn_output, nc1),
                            (self.btn_settings, nc1),
                            (self.btn_export, nc1),
+                           (self.btn_export_all, nc1),
                            (self.btn_theme, nc2)]:
             btn.recolor(t["btn_bg"], t["btn_fg"],
                         t["btn_hover"], t["btn_active"], outer, ol)
@@ -541,39 +551,62 @@ class Annotator:
         tk.Entry(win, textvariable=img_var, width=48,
                  **ent_kw).grid(row=2, column=1, **pad)
 
+        # Export format
+        tk.Label(win, text="Export Filename:", anchor=tk.W,
+                 **lbl_kw).grid(row=3, column=0, sticky=tk.W, **pad)
+        exp_var = tk.StringVar(value=self.export_format)
+        tk.Entry(win, textvariable=exp_var, width=48,
+                 **ent_kw).grid(row=3, column=1, **pad)
+
         # Help
         tk.Label(
-            win, text="Variables:  {filename}  {frame}  {us}",
+            win, text="Variables:  {filename}  {frame}  {us}  {segment}",
             font=FONT_SM, fg=t["dlg_fg"], bg=t["dlg_bg"],
-        ).grid(row=3, column=0, columnspan=3, sticky=tk.W, **pad)
+        ).grid(row=4, column=0, columnspan=3, sticky=tk.W, **pad)
 
         # Preview
         preview_var = tk.StringVar()
 
         def update_preview(*_):
+            lines = []
             try:
-                name = img_var.get().format(
+                csv_name = csv_var.get().format(filename="example")
+            except (KeyError, ValueError):
+                csv_name = "(format error)"
+            lines.append(f"CSV:  {csv_name}")
+            try:
+                img_name = img_var.get().format(
                     filename="example", frame=120, us=4000000)
             except (KeyError, ValueError):
-                name = "(format error)"
-            preview_var.set(f"Preview:  {name}")
+                img_name = "(format error)"
+            lines.append(f"Image:  {img_name}")
+            try:
+                exp_name = exp_var.get().format(
+                    filename="example", segment=1)
+            except (KeyError, ValueError):
+                exp_name = "(format error)"
+            lines.append(f"Export:  {exp_name}")
+            preview_var.set("\n".join(lines))
 
+        csv_var.trace_add("write", update_preview)
         img_var.trace_add("write", update_preview)
+        exp_var.trace_add("write", update_preview)
         update_preview()
 
         tk.Label(
-            win, textvariable=preview_var,
+            win, textvariable=preview_var, justify=tk.LEFT,
             font=FONT_SM, fg=t["dlg_fg"], bg=t["dlg_bg"],
-        ).grid(row=4, column=0, columnspan=3, sticky=tk.W, **pad)
+        ).grid(row=5, column=0, columnspan=3, sticky=tk.W, **pad)
 
         # Buttons
         btn_row = tk.Frame(win, bg=t["dlg_bg"])
-        btn_row.grid(row=5, column=0, columnspan=3, pady=12)
+        btn_row.grid(row=6, column=0, columnspan=3, pady=12)
 
         def save():
             self.output_folder = out_var.get()
             self.csv_name = csv_var.get() or DEFAULT_CSV_NAME
             self.image_format = img_var.get() or DEFAULT_IMAGE_FMT
+            self.export_format = exp_var.get() or DEFAULT_EXPORT_FMT
             self._save_config()
             self._update_footer()
             win.destroy()
@@ -658,7 +691,6 @@ class Annotator:
         self.frame_no = 0
         self.start_us = None
         self.end_us = None
-        self.segments = []
 
         self.slider.configure(to=max(self.total_frames - 1, 0))
         self.nav_cv.itemconfigure(
@@ -824,7 +856,9 @@ class Annotator:
     def _save_segment(self):
         if self.start_us is None or self.end_us is None:
             return
-        self.segments.append((self.start_us, self.end_us))
+        fname = (os.path.basename(self.files[self.file_idx])
+                 if self.files else "")
+        self.segments.append((fname, self.start_us, self.end_us))
         self.start_us = None
         self.end_us = None
         self._display()
@@ -862,7 +896,6 @@ class Annotator:
     def _write_csv(self):
         if not self.output_folder or not self.segments or not self.files:
             return 0
-        fname = os.path.basename(self.files[self.file_idx])
         csv_path = self._resolve_csv_path()
         write_header = not os.path.exists(csv_path)
 
@@ -870,8 +903,10 @@ class Annotator:
             writer = csv.writer(f)
             if write_header:
                 writer.writerow(["filename", "segment", "start_us", "end_us"])
-            for i, (s, e) in enumerate(self.segments, 1):
-                writer.writerow([fname, i, s, e])
+            seg_counter = {}
+            for fn, s, e in self.segments:
+                seg_counter[fn] = seg_counter.get(fn, 0) + 1
+                writer.writerow([fn, seg_counter[fn], s, e])
         return len(self.segments)
 
     def _ctrl_save(self):
@@ -890,30 +925,56 @@ class Annotator:
             messagebox.showinfo("暫存標記", "目前沒有暫存的標記區間")
             return
         lines = []
-        for i, (s, e) in enumerate(self.segments, 1):
-            lines.append(f"  [{i}]  {s}  ~  {e}  us")
-        fname = (os.path.basename(self.files[self.file_idx])
-                 if self.files else "")
-        msg = (f"檔案: {fname}\n"
-               f"共 {len(self.segments)} 段:\n\n" + "\n".join(lines))
+        seg_counter = {}
+        for fn, s, e in self.segments:
+            seg_counter[fn] = seg_counter.get(fn, 0) + 1
+            lines.append(f"  {fn} seg:{seg_counter[fn]}  |  {s}  ~  {e}  us")
+        msg = f"共 {len(self.segments)} 段:\n\n" + "\n".join(lines)
         messagebox.showinfo("暫存標記一覽", msg)
 
     def _undo_segment(self):
         if not self.segments:
             return
         removed = self.segments.pop()
-        self.start_us = removed[0]
-        self.end_us = removed[1]
+        self.start_us = removed[1]
+        self.end_us = removed[2]
         self._display()
 
     # ── Export segments (ffmpeg) ────────────────────
 
+    def _read_csv_segments(self):
+        """從 CSV 檔讀取當前影片的標記區間，回傳 list of (start_us, end_us)。"""
+        csv_path = self._resolve_csv_path()
+        if not os.path.exists(csv_path):
+            return []
+        fname = os.path.basename(self.files[self.file_idx]) if self.files else ""
+        segs = []
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("filename") == fname:
+                    segs.append((int(row["start_us"]), int(row["end_us"])))
+        return segs
+
+    def _find_mkvmerge(self):
+        """尋找 mkvmerge 執行檔，回傳完整路徑或 None。"""
+        found = shutil.which("mkvmerge")
+        if found:
+            return found
+        # MKVToolNix 常見安裝位置
+        for prog_dir in [os.environ.get("PROGRAMFILES", ""),
+                         os.environ.get("PROGRAMFILES(X86)", "")]:
+            candidate = os.path.join(prog_dir, "MKVToolNix", "mkvmerge.exe")
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
     def _export_segments(self):
-        if not shutil.which("ffmpeg"):
-            messagebox.showerror("錯誤", "找不到 ffmpeg，請確認已安裝並加入 PATH")
-            return
-        if not self.segments:
-            messagebox.showinfo("提示", "目前沒有暫存的標記區間，無法匯出")
+        mkvmerge_path = self._find_mkvmerge()
+        if not mkvmerge_path:
+            messagebox.showerror("錯誤",
+                                 "找不到 mkvmerge，請安裝 MKVToolNix\n"
+                                 "https://mkvtoolnix.download/")
             return
         if not self.files:
             return
@@ -921,9 +982,19 @@ class Annotator:
             messagebox.showinfo("提示", "請先設定 Output Folder")
             return
 
-        src = self.files[self.file_idx]
-        basename = os.path.splitext(os.path.basename(src))[0]
-        ext = os.path.splitext(src)[1]
+        # 優先使用 CSV 檔案的區間，若無 CSV 則使用暫存標記
+        csv_segs = self._read_csv_segments()
+        if csv_segs:
+            cur = os.path.basename(self.files[self.file_idx])
+            export_segs = [(cur, s, e) for s, e in csv_segs]
+        elif self.segments:
+            export_segs = list(self.segments)  # (filename, start_us, end_us)
+        else:
+            messagebox.showinfo("提示", "找不到 CSV 檔案，暫存標記也是空的，無法匯出")
+            return
+
+        # 建立檔名到完整路徑的對應
+        file_map = {os.path.basename(f): f for f in self.files}
 
         # 建立進度視窗
         win = tk.Toplevel(self.root)
@@ -944,48 +1015,65 @@ class Annotator:
                                 font=FONT_SM)
         progress_lbl.pack()
 
-        segments = list(self.segments)
+        segments = export_segs
+        export_fmt = self.export_format
         results = {"ok": 0, "fail": 0, "errors": []}
 
         def _us_to_ts(us):
-            """微秒轉為 HH:MM:SS.mmm 時間格式。"""
+            """微秒轉為 HH:MM:SS.nnnnnnnnn 時間格式。"""
             total_s = us / 1_000_000
             h = int(total_s // 3600)
             m = int((total_s % 3600) // 60)
             s = total_s % 60
-            return f"{h:02d}:{m:02d}:{s:09.6f}"
+            return f"{h:02d}:{m:02d}:{s:012.9f}"
 
         def _run():
-            for i, (s_us, e_us) in enumerate(segments, 1):
-                def _update_label(idx=i):
-                    lbl.configure(
-                        text=f"正在匯出第 {idx}/{len(segments)} 段...")
-                    progress_lbl.configure(
-                        text=f"{basename}_seg{idx}{ext}")
+            seg_counter = {}
+            for idx, (fn, s_us, e_us) in enumerate(segments, 1):
+                seg_counter[fn] = seg_counter.get(fn, 0) + 1
+                seg_no = seg_counter[fn]
+                bn = os.path.splitext(fn)[0]
+                src = file_map.get(fn, "")
+
+                try:
+                    out_name = export_fmt.format(
+                        filename=bn, segment=seg_no)
+                except (KeyError, ValueError):
+                    out_name = f"{bn}_seg{seg_no}.mkv"
+
+                def _update_label(_idx=idx, _name=out_name):
+                    try:
+                        lbl.configure(
+                            text=f"正在匯出第 {_idx}/{len(segments)} 段...")
+                        progress_lbl.configure(text=_name)
+                    except tk.TclError:
+                        pass
                 try:
                     win.after(0, _update_label)
                 except tk.TclError:
-                    return
+                    pass
 
-                out_name = f"{basename}_seg{i}{ext}"
+                if not src or not os.path.isfile(src):
+                    results["fail"] += 1
+                    results["errors"].append(
+                        f"{fn} seg{seg_no}: 找不到來源影片")
+                    continue
                 out_path = os.path.join(self.output_folder, out_name)
 
                 ss = _us_to_ts(s_us)
                 to = _us_to_ts(e_us)
 
+                # 使用 mkvmerge --split parts 裁剪，完整保留所有軌道與 codec tag
                 cmd = [
-                    "ffmpeg", "-y",
-                    "-ss", ss,
-                    "-to", to,
-                    "-i", src,
-                    "-c", "copy",
-                    "-avoid_negative_ts", "make_zero",
-                    out_path,
+                    mkvmerge_path,
+                    "-o", out_path,
+                    "--split", f"parts:{ss}-{to}",
+                    src,
                 ]
                 try:
                     subprocess.run(
                         cmd, check=True,
-                        stdout=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         creationflags=(subprocess.CREATE_NO_WINDOW
                                        if sys.platform == "win32" else 0),
@@ -993,8 +1081,10 @@ class Annotator:
                     results["ok"] += 1
                 except subprocess.CalledProcessError as exc:
                     results["fail"] += 1
+                    output = (exc.stdout or exc.stderr or b"").decode(
+                        errors="replace")[-500:]
                     results["errors"].append(
-                        f"seg{i}: {exc.stderr.decode(errors='replace')[:200]}")
+                        f"{fn} seg{seg_no}: {output}")
 
             def _done():
                 try:
@@ -1016,12 +1106,160 @@ class Annotator:
 
         threading.Thread(target=_run, daemon=True).start()
 
+    # ── Export All (from CSV) ───────────────────────
+
+    def _read_all_csv_segments(self):
+        """讀取 output_folder 中所有 CSV 檔的標記區間，
+        回傳 list of (filename, start_us, end_us)。"""
+        if not self.output_folder:
+            return []
+        all_segs = []
+        for csv_file in glob.glob(os.path.join(self.output_folder, "*.csv")):
+            with open(csv_file, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    fn = row.get("filename", "")
+                    s = row.get("start_us", "")
+                    e = row.get("end_us", "")
+                    if fn and s and e:
+                        all_segs.append((fn, int(s), int(e)))
+        return all_segs
+
+    def _export_all(self):
+        mkvmerge_path = self._find_mkvmerge()
+        if not mkvmerge_path:
+            messagebox.showerror("錯誤",
+                                 "找不到 mkvmerge，請安裝 MKVToolNix\n"
+                                 "https://mkvtoolnix.download/")
+            return
+        if not self.output_folder:
+            messagebox.showinfo("提示", "請先設定 Output Folder")
+            return
+
+        all_segs = self._read_all_csv_segments()
+        if not all_segs:
+            messagebox.showinfo("提示", "CSV 檔案中沒有任何標記區間")
+            return
+
+        # 建立檔名到完整路徑的對應
+        file_map = {os.path.basename(f): f for f in self.files}
+
+        # 建立進度視窗
+        win = tk.Toplevel(self.root)
+        win.title("匯出全部剪輯")
+        win.configure(bg=self._t["dlg_bg"])
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+        win.geometry("420x120")
+
+        lbl = tk.Label(win, text="準備中...",
+                       bg=self._t["dlg_bg"], fg=self._t["dlg_fg"],
+                       font=FONT_UI)
+        lbl.pack(pady=(16, 8))
+
+        progress_lbl = tk.Label(win, text="",
+                                bg=self._t["dlg_bg"], fg=self._t["dlg_fg"],
+                                font=FONT_SM)
+        progress_lbl.pack()
+
+        segments = all_segs
+        export_fmt = self.export_format
+        results = {"ok": 0, "fail": 0, "errors": []}
+
+        def _us_to_ts(us):
+            total_s = us / 1_000_000
+            h = int(total_s // 3600)
+            m = int((total_s % 3600) // 60)
+            s = total_s % 60
+            return f"{h:02d}:{m:02d}:{s:012.9f}"
+
+        def _run():
+            seg_counter = {}
+            for idx, (fn, s_us, e_us) in enumerate(segments, 1):
+                seg_counter[fn] = seg_counter.get(fn, 0) + 1
+                seg_no = seg_counter[fn]
+                bn = os.path.splitext(fn)[0]
+                src = file_map.get(fn, "")
+
+                try:
+                    out_name = export_fmt.format(
+                        filename=bn, segment=seg_no)
+                except (KeyError, ValueError):
+                    out_name = f"{bn}_seg{seg_no}.mkv"
+
+                def _update_label(_idx=idx, _name=out_name):
+                    try:
+                        lbl.configure(
+                            text=f"正在匯出第 {_idx}/{len(segments)} 段...")
+                        progress_lbl.configure(text=_name)
+                    except tk.TclError:
+                        pass
+                try:
+                    win.after(0, _update_label)
+                except tk.TclError:
+                    pass
+
+                if not src or not os.path.isfile(src):
+                    results["fail"] += 1
+                    results["errors"].append(
+                        f"{fn} seg{seg_no}: 找不到來源影片")
+                    continue
+                out_path = os.path.join(self.output_folder, out_name)
+
+                ss = _us_to_ts(s_us)
+                to = _us_to_ts(e_us)
+
+                cmd = [
+                    mkvmerge_path,
+                    "-o", out_path,
+                    "--split", f"parts:{ss}-{to}",
+                    src,
+                ]
+                try:
+                    subprocess.run(
+                        cmd, check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        creationflags=(subprocess.CREATE_NO_WINDOW
+                                       if sys.platform == "win32" else 0),
+                    )
+                    results["ok"] += 1
+                except subprocess.CalledProcessError as exc:
+                    results["fail"] += 1
+                    output = (exc.stdout or exc.stderr or b"").decode(
+                        errors="replace")[-500:]
+                    results["errors"].append(
+                        f"{fn} seg{seg_no}: {output}")
+
+            def _done():
+                try:
+                    win.destroy()
+                except tk.TclError:
+                    pass
+                msg = f"成功匯出 {results['ok']}/{len(segments)} 段"
+                if results["fail"]:
+                    msg += f"\n失敗 {results['fail']} 段"
+                    for e in results["errors"]:
+                        msg += f"\n  {e}"
+                msg += f"\n\n輸出目錄: {self.output_folder}"
+                messagebox.showinfo("匯出全部完成", msg)
+
+            try:
+                self.root.after(0, _done)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=_run, daemon=True).start()
+
     # ── Next / Prev video ──────────────────────────
 
     def _next_video(self):
         if not self.cap or not self.output_folder:
             return
-        self._write_csv()
+        if self.file_idx >= len(self.files) - 1:
+            messagebox.showinfo("提示", "這是最後一部影片")
+            return
         self.file_idx += 1
         self._load_current_video()
 
