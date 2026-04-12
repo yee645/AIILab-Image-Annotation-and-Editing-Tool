@@ -6,8 +6,8 @@
   Shift+A/D   — 跳到影片開頭 / 結尾
   Left/Right  — 等同 A/D（後退 / 前進 1 幀）
   Shift+Left/Right — 跳到影片開頭 / 結尾
-  J           — 標記 start_us
-  K           — 標記 end_us
+  I           — 標記 start_us
+  O           — 標記 end_us
   Enter       — 儲存區間到暫存清單
   P           — 擷取目前畫面
   Ctrl+S      — 立即將暫存標記寫入 CSV（不換片）
@@ -17,6 +17,13 @@
   N           — 載入下一部影片（暫存標記保留）
   Ctrl+E      — 將暫存區間匯出為剪輯影片（ffmpeg）
   Ctrl+Q      — 退出
+
+影片預覽縮放：
+  + / =       — 放大
+  -           — 縮小
+  滑鼠滾輪    — 放大 / 縮小（以游標位置為中心）
+  滑鼠左鍵拖曳 — 平移檢視（縮放後可檢視特定位置）
+  0           — 還原縮放
 """
 
 import csv
@@ -39,6 +46,45 @@ if sys.platform == "win32":
     try:
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+
+# Windows IME 控制（避免中文輸入法攔截按鍵事件造成快捷鍵卡頓）
+_IMM32 = None
+_USER32 = None
+if sys.platform == "win32":
+    try:
+        import ctypes
+        from ctypes import wintypes
+        _IMM32 = ctypes.WinDLL("imm32", use_last_error=True)
+        _IMM32.ImmAssociateContextEx.argtypes = [
+            wintypes.HWND, wintypes.HANDLE, wintypes.DWORD]
+        _IMM32.ImmAssociateContextEx.restype = wintypes.BOOL
+        _USER32 = ctypes.WinDLL("user32", use_last_error=True)
+        _USER32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        _USER32.GetAncestor.restype = wintypes.HWND
+    except Exception:
+        _IMM32 = None
+        _USER32 = None
+
+_IACE_DEFAULT = 0x0010  # 恢復系統預設 IME context
+_GA_ROOT = 2
+
+
+def _ime_set(widget, enabled):
+    """對指定 Tk widget 對應之 Win32 HWND 啟用或停用 IME。"""
+    if _IMM32 is None or _USER32 is None:
+        return
+    try:
+        widget.update_idletasks()
+        hwnd = widget.winfo_id()
+        if not hwnd:
+            return
+        flags = _IACE_DEFAULT if enabled else 0
+        _IMM32.ImmAssociateContextEx(hwnd, None, flags)
+        top = _USER32.GetAncestor(hwnd, _GA_ROOT)
+        if top and top != hwnd:
+            _IMM32.ImmAssociateContextEx(top, None, flags)
     except Exception:
         pass
 
@@ -243,10 +289,22 @@ class Annotator:
         self._resize_after_id = None
         self.theme_name = "light"
 
+        # 縮放與平移狀態
+        self.zoom = 1.0
+        self.zoom_min = 1.0
+        self.zoom_max = 16.0
+        self.pan_cx = 0.5
+        self.pan_cy = 0.5
+        self._drag_start = None
+        self._drag_start_pan = None
+        self._last_fit_scale = 1.0
+
         self._load_config()
         self._build_ui()
         self._bind_keys()
         self._update_footer()
+        # 鎖定主視窗 IME，避免中文輸入法攔截按鍵造成快捷鍵卡頓
+        _ime_set(self.root, enabled=False)
         self._auto_load_input()
         self.root.mainloop()
 
@@ -484,8 +542,8 @@ class Annotator:
             ("<Right>", lambda e: self._step(1)),
             ("<Shift-Left>", lambda e: self._jump_start()),
             ("<Shift-Right>", lambda e: self._jump_end()),
-            ("<j>", lambda e: self._mark_start()),
-            ("<k>", lambda e: self._mark_end()),
+            ("<i>", lambda e: self._mark_start()),
+            ("<o>", lambda e: self._mark_end()),
             ("<Return>", lambda e: self._save_segment()),
             ("<p>", lambda e: self._capture_frame()),
             ("<n>", lambda e: self._next_video()),
@@ -496,8 +554,24 @@ class Annotator:
             ("<Control-e>", lambda e: self._export_segments()),
             ("<Control-q>", lambda e: self._quit()),
             ("<Escape>", lambda e: self._quit()),
+            ("<plus>", lambda e: self._zoom_step(1.2)),
+            ("<KP_Add>", lambda e: self._zoom_step(1.2)),
+            ("<equal>", lambda e: self._zoom_step(1.2)),
+            ("<minus>", lambda e: self._zoom_step(1 / 1.2)),
+            ("<KP_Subtract>", lambda e: self._zoom_step(1 / 1.2)),
+            ("<Key-0>", lambda e: self._zoom_reset()),
+            ("<KP_0>", lambda e: self._zoom_reset()),
         ]:
             self.root.bind(key, cb)
+
+        # 影片預覽滑鼠事件（縮放 / 拖曳）
+        for widget in (self.vframe, self.canvas):
+            widget.bind("<MouseWheel>", self._on_mousewheel)
+            widget.bind("<Button-4>", self._on_mousewheel)  # Linux 上滾
+            widget.bind("<Button-5>", self._on_mousewheel)  # Linux 下滾
+            widget.bind("<ButtonPress-1>", self._on_drag_start)
+            widget.bind("<B1-Motion>", self._on_drag_move)
+            widget.bind("<ButtonRelease-1>", self._on_drag_end)
 
     # ── Settings dialog ─────────────────────────────
 
@@ -509,6 +583,15 @@ class Annotator:
         win.resizable(False, False)
         win.transient(self.root)
         win.grab_set()
+        # 在 Settings 視窗啟用 IME（允許中文輸入），關閉時自動恢復主視窗鎖定
+        _ime_set(win, enabled=True)
+        win.bind(
+            "<Destroy>",
+            lambda e, w=win: (
+                _ime_set(self.root, enabled=False)
+                if e.widget is w else None
+            ),
+        )
 
         lbl_kw = {"bg": t["dlg_bg"], "fg": t["dlg_fg"], "font": FONT_UI}
         ent_kw = {"bg": t["dlg_entry_bg"], "fg": t["dlg_entry_fg"],
@@ -691,6 +774,9 @@ class Annotator:
         self.frame_no = 0
         self.start_us = None
         self.end_us = None
+        self.zoom = 1.0
+        self.pan_cx = 0.5
+        self.pan_cy = 0.5
 
         self.slider.configure(to=max(self.total_frames - 1, 0))
         self.nav_cv.itemconfigure(
@@ -757,13 +843,15 @@ class Annotator:
 
         s = self.start_us if self.start_us is not None else "---"
         e = self.end_us if self.end_us is not None else "---"
+        zoom_txt = f"{self.zoom:.2f}x" if self.zoom > 1.0 + 1e-6 else "1.00x"
         self.info_cv.itemconfigure(self._info_txt, text=(
             f"Frame: {self.frame_no}/{self.total_frames - 1}  |  "
             f"Time: {self._cached_us} us  |  "
             f"Start: {s}  |  End: {e}  |  "
-            f"Segments: {len(self.segments)}\n"
+            f"Segments: {len(self.segments)}  |  Zoom: {zoom_txt}\n"
             f"[A/D/Arrow]+-1  [W/S]+-30  [Shift+A/D]Head/Tail  "
-            f"[J]Start  [K]End  [Enter]Save  [P]Capture  "
+            f"[I]Start  [O]End  [Enter]Save  [P]Capture  "
+            f"[+/-/Wheel]Zoom  [Drag]Pan  [0]Reset  "
             f"[Ctrl+Z]Undo  [Ctrl+S]Write  [Shift+S]View  "
             f"[BS]Prev  [N]Next  [Ctrl+Q]Quit"))
 
@@ -774,25 +862,220 @@ class Annotator:
 
         frame = self._cached_frame
         ih, iw = frame.shape[:2]
-        scale = min(cw / iw, ch / ih)
-        new_w, new_h = int(iw * scale), int(ih * scale)
-        if new_w <= 0 or new_h <= 0:
-            return
 
-        if (new_w, new_h) != (iw, ih):
-            frame = cv2.resize(
-                frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        fit_scale = min(cw / iw, ch / ih)
+        self._last_fit_scale = fit_scale
+        disp_w = max(1, int(iw * fit_scale))
+        disp_h = max(1, int(ih * fit_scale))
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if self.zoom <= 1.0 + 1e-6:
+            self.zoom = 1.0
+            self.pan_cx = 0.5
+            self.pan_cy = 0.5
+            src = frame
+        else:
+            roi_w = iw / self.zoom
+            roi_h = ih / self.zoom
+            cx = self.pan_cx * iw
+            cy = self.pan_cy * ih
+            x1 = cx - roi_w / 2
+            y1 = cy - roi_h / 2
+            if x1 < 0:
+                x1 = 0
+            if y1 < 0:
+                y1 = 0
+            if x1 + roi_w > iw:
+                x1 = iw - roi_w
+            if y1 + roi_h > ih:
+                y1 = ih - roi_h
+            self.pan_cx = (x1 + roi_w / 2) / iw
+            self.pan_cy = (y1 + roi_h / 2) / ih
+
+            ix1 = max(0, int(round(x1)))
+            iy1 = max(0, int(round(y1)))
+            ix2 = min(iw, int(round(x1 + roi_w)))
+            iy2 = min(ih, int(round(y1 + roi_h)))
+            if ix2 - ix1 < 1 or iy2 - iy1 < 1:
+                return
+            src = frame[iy1:iy2, ix1:ix2]
+
+        disp_frame = cv2.resize(
+            src, (disp_w, disp_h), interpolation=cv2.INTER_LINEAR)
+
+        rgb = cv2.cvtColor(disp_frame, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(rgb)
 
         if (self.photo is not None
-                and self.photo.width() == new_w
-                and self.photo.height() == new_h):
+                and self.photo.width() == disp_w
+                and self.photo.height() == disp_h):
             self.photo.paste(img)
         else:
             self.photo = ImageTk.PhotoImage(img)
             self.canvas.configure(image=self.photo)
+
+    # ── 縮放 / 平移 ────────────────────────────────
+
+    def _clamp_zoom(self, value):
+        if value < self.zoom_min:
+            return self.zoom_min
+        if value > self.zoom_max:
+            return self.zoom_max
+        return value
+
+    def _viewport_to_image(self, vx, vy):
+        """將 viewport 座標換算為來源影像座標（None 表示不在影像範圍內）。"""
+        if self._cached_frame is None:
+            return None
+        ih, iw = self._cached_frame.shape[:2]
+        cw = self.vframe.winfo_width()
+        ch = self.vframe.winfo_height()
+        if cw <= 1 or ch <= 1:
+            return None
+        fit_scale = min(cw / iw, ch / ih)
+        disp_w = iw * fit_scale
+        disp_h = ih * fit_scale
+        off_x = (cw - disp_w) / 2
+        off_y = (ch - disp_h) / 2
+        lx = vx - off_x
+        ly = vy - off_y
+        if lx < 0 or ly < 0 or lx > disp_w or ly > disp_h:
+            return None
+        # lx/ly 為 fit 後影像座標（0..disp_w / 0..disp_h）
+        # 將其換算為縮放後 ROI 的影像座標
+        roi_w = iw / self.zoom
+        roi_h = ih / self.zoom
+        cx = self.pan_cx * iw
+        cy = self.pan_cy * ih
+        rx1 = cx - roi_w / 2
+        ry1 = cy - roi_h / 2
+        if self.zoom > 1.0:
+            if rx1 < 0:
+                rx1 = 0
+            if ry1 < 0:
+                ry1 = 0
+            if rx1 + roi_w > iw:
+                rx1 = iw - roi_w
+            if ry1 + roi_h > ih:
+                ry1 = ih - roi_h
+        img_x = rx1 + (lx / disp_w) * roi_w
+        img_y = ry1 + (ly / disp_h) * roi_h
+        return img_x, img_y
+
+    def _zoom_to(self, new_zoom, anchor_vx=None, anchor_vy=None):
+        new_zoom = self._clamp_zoom(new_zoom)
+        if abs(new_zoom - self.zoom) < 1e-6:
+            return
+
+        if self._cached_frame is None:
+            self.zoom = new_zoom
+            return
+
+        ih, iw = self._cached_frame.shape[:2]
+        anchor_img = None
+        if anchor_vx is not None and anchor_vy is not None:
+            anchor_img = self._viewport_to_image(anchor_vx, anchor_vy)
+
+        if anchor_img is None or new_zoom <= 1.0:
+            self.zoom = new_zoom
+        else:
+            ax, ay = anchor_img
+            # 以 anchor 為固定點調整 pan_cx/cy
+            cw = self.vframe.winfo_width()
+            ch = self.vframe.winfo_height()
+            fit_scale = min(cw / iw, ch / ih)
+            disp_w = iw * fit_scale
+            disp_h = ih * fit_scale
+            off_x = (cw - disp_w) / 2
+            off_y = (ch - disp_h) / 2
+            # anchor 在 viewport 中的正規化位置 (0..1) 相對顯示框
+            nx = (anchor_vx - off_x) / disp_w
+            ny = (anchor_vy - off_y) / disp_h
+            nx = min(max(nx, 0.0), 1.0)
+            ny = min(max(ny, 0.0), 1.0)
+            new_roi_w = iw / new_zoom
+            new_roi_h = ih / new_zoom
+            new_x1 = ax - nx * new_roi_w
+            new_y1 = ay - ny * new_roi_h
+            self.pan_cx = (new_x1 + new_roi_w / 2) / iw
+            self.pan_cy = (new_y1 + new_roi_h / 2) / ih
+            self.zoom = new_zoom
+
+        self._display()
+
+    def _zoom_step(self, factor):
+        self._zoom_to(self.zoom * factor)
+
+    def _zoom_reset(self):
+        self.zoom = 1.0
+        self.pan_cx = 0.5
+        self.pan_cy = 0.5
+        self._display()
+
+    def _on_mousewheel(self, event):
+        if self._cached_frame is None:
+            return
+        delta = 0
+        if getattr(event, "num", None) == 4:
+            delta = 1
+        elif getattr(event, "num", None) == 5:
+            delta = -1
+        elif getattr(event, "delta", 0) > 0:
+            delta = 1
+        elif getattr(event, "delta", 0) < 0:
+            delta = -1
+        if delta == 0:
+            return
+        factor = 1.2 if delta > 0 else (1 / 1.2)
+        # 事件座標相對觸發 widget，轉為 vframe 座標
+        vx = event.x_root - self.vframe.winfo_rootx()
+        vy = event.y_root - self.vframe.winfo_rooty()
+        self._zoom_to(self.zoom * factor, vx, vy)
+
+    def _on_drag_start(self, event):
+        if self._cached_frame is None or self.zoom <= 1.0 + 1e-6:
+            self._drag_start = None
+            return
+        vx = event.x_root - self.vframe.winfo_rootx()
+        vy = event.y_root - self.vframe.winfo_rooty()
+        self._drag_start = (vx, vy)
+        self._drag_start_pan = (self.pan_cx, self.pan_cy)
+        try:
+            self.canvas.configure(cursor="fleur")
+        except tk.TclError:
+            pass
+
+    def _on_drag_move(self, event):
+        if self._drag_start is None or self._cached_frame is None:
+            return
+        if self.zoom <= 1.0 + 1e-6:
+            return
+        ih, iw = self._cached_frame.shape[:2]
+        cw = self.vframe.winfo_width()
+        ch = self.vframe.winfo_height()
+        if cw <= 1 or ch <= 1:
+            return
+        fit_scale = min(cw / iw, ch / ih)
+        effective = fit_scale * self.zoom
+        if effective <= 0:
+            return
+        vx = event.x_root - self.vframe.winfo_rootx()
+        vy = event.y_root - self.vframe.winfo_rooty()
+        dx = vx - self._drag_start[0]
+        dy = vy - self._drag_start[1]
+        img_dx = dx / effective
+        img_dy = dy / effective
+        start_cx, start_cy = self._drag_start_pan
+        self.pan_cx = start_cx - img_dx / iw
+        self.pan_cy = start_cy - img_dy / ih
+        self._display()
+
+    def _on_drag_end(self, event):
+        self._drag_start = None
+        self._drag_start_pan = None
+        try:
+            self.canvas.configure(cursor="")
+        except tk.TclError:
+            pass
 
     # ── Navigation ──────────────────────────────────
 
