@@ -374,7 +374,7 @@ class Annotator:
 
         # -- Info panel --
         self.info_cv = tk.Canvas(
-            self.root, height=62, highlightthickness=0, bd=0)
+            self.root, height=86, highlightthickness=0, bd=0)
         self.info_cv.pack(fill=tk.X, side=tk.BOTTOM)
         self._info_txt = self.info_cv.create_text(
             12, 6, anchor="nw", font=FONT_UI,
@@ -850,7 +850,7 @@ class Annotator:
             f"Start: {s}  |  End: {e}  |  "
             f"Segments: {len(self.segments)}  |  Zoom: {zoom_txt}\n"
             f"[A/D/Arrow]+-1  [W/S]+-30  [Shift+A/D]Head/Tail  "
-            f"[I]Start  [O]End  [Enter]Save  [P]Capture  "
+            f"[I]Start  [O]End  [Enter]Save  [P]Capture\n"
             f"[+/-/Wheel]Zoom  [Drag]Pan  [0]Reset  "
             f"[Ctrl+Z]Undo  [Ctrl+S]Write  [Shift+S]View  "
             f"[BS]Prev  [N]Next  [Ctrl+Q]Quit"))
