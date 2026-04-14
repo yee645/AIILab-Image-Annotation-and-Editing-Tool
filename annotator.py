@@ -1,29 +1,34 @@
 """Azure Kinect 影片標記工具
 
-快捷鍵：
-  A / D       — 後退 / 前進 1 幀
-  W / S       — 後退 / 前進 30 幀
-  Shift+A/D   — 跳到影片開頭 / 結尾
-  Left/Right  — 等同 A/D（後退 / 前進 1 幀）
-  Shift+Left/Right — 跳到影片開頭 / 結尾
-  I           — 標記 start_us
-  O           — 標記 end_us
-  Enter       — 儲存區間到暫存清單
-  P           — 擷取目前畫面
-  Ctrl+S      — 立即將暫存標記寫入 CSV（不換片）
-  Shift+S     — 顯示目前所有已暫存的標記區間
-  Ctrl+Z      — 復原上一筆標記區間
-  Backspace   — 回到上一部影片
-  N           — 載入下一部影片（暫存標記保留）
-  Ctrl+E      — 將暫存區間匯出為剪輯影片（ffmpeg）
-  Ctrl+Q      — 退出
+快捷鍵（依使用邏輯分類）：
+
+瀏覽：
+  A / D / Left / Right  — 後退 / 前進 1 幀
+  W / S                 — 後退 / 前進 30 幀
+  Home / Shift+A        — 跳到影片開頭
+  End  / Shift+D        — 跳到影片結尾
+  PageUp / Backspace    — 上一部影片
+  PageDown / N          — 下一部影片
+
+標記與擷取：
+  I           — 標記起點（In）
+  O           — 標記終點（Out）
+  Enter       — 儲存目前區間（自動寫入 CSV）
+  F / P       — 擷取目前畫面
+  Ctrl+Z      — 復原上一筆（僅限尚未寫入 CSV 的）
+
+檔案與匯出：
+  Ctrl+S          — 立即將暫存標記寫入 CSV
+  Ctrl+Shift+S    — 顯示目前所有暫存區間
+  Ctrl+E          — 匯出目前影片的剪輯
+  Ctrl+Q / Esc    — 離開程式
 
 影片預覽縮放：
-  + / =       — 放大
-  -           — 縮小
-  滑鼠滾輪    — 放大 / 縮小（以游標位置為中心）
-  滑鼠左鍵拖曳 — 平移檢視（縮放後可檢視特定位置）
-  0           — 還原縮放
+  + / =          — 放大
+  -              — 縮小
+  0              — 還原縮放
+  滑鼠滾輪       — 放大 / 縮小（以游標位置為中心）
+  滑鼠左鍵拖曳   — 平移檢視
 """
 
 import csv
@@ -299,10 +304,16 @@ class Annotator:
         self._drag_start_pan = None
         self._last_fit_scale = 1.0
 
+        # 自動儲存狀態：_saved_count 表示 self.segments 中已寫入 CSV 的筆數
+        self._saved_count = 0
+
         self._load_config()
         self._build_ui()
+        self._build_menu()
         self._bind_keys()
         self._update_footer()
+        # 關閉視窗時（含右上角 X）走自訂關閉流程，檢查未儲存標記
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         # 鎖定主視窗 IME，避免中文輸入法攔截按鍵造成快捷鍵卡頓
         _ime_set(self.root, enabled=False)
         self._auto_load_input()
@@ -401,46 +412,16 @@ class Annotator:
         nc1, nc2 = t["nav_start"], t["nav_end"]
         ol = t["btn_outline"]
 
-        self.btn_input = RoundedButton(
-            self.nav_cv, "Input Folder", self._select_input,
-            bg=t["btn_bg"], fg=t["btn_fg"],
-            hover_bg=t["btn_hover"], active_bg=t["btn_active"],
-            outline_color=ol, outer_bg=nc1)
-        self.btn_output = RoundedButton(
-            self.nav_cv, "Output Folder", self._select_output,
-            bg=t["btn_bg"], fg=t["btn_fg"],
-            hover_bg=t["btn_hover"], active_bg=t["btn_active"],
-            outline_color=ol, outer_bg=nc1)
-        self.btn_settings = RoundedButton(
-            self.nav_cv, "Settings", self._open_settings,
-            bg=t["btn_bg"], fg=t["btn_fg"],
-            hover_bg=t["btn_hover"], active_bg=t["btn_active"],
-            outline_color=ol, outer_bg=nc1)
-        self.btn_export = RoundedButton(
-            self.nav_cv, "Export", self._export_segments,
-            bg=t["btn_bg"], fg=t["btn_fg"],
-            hover_bg=t["btn_hover"], active_bg=t["btn_active"],
-            outline_color=ol, outer_bg=nc1)
-        self.btn_export_all = RoundedButton(
-            self.nav_cv, "Export All", self._export_all,
-            bg=t["btn_bg"], fg=t["btn_fg"],
-            hover_bg=t["btn_hover"], active_bg=t["btn_active"],
-            outline_color=ol, outer_bg=nc1)
         self.btn_theme = RoundedButton(
             self.nav_cv, t["toggle_label"], self._toggle_theme,
             bg=t["btn_bg"], fg=t["btn_fg"],
             hover_bg=t["btn_hover"], active_bg=t["btn_active"],
             outline_color=ol, outer_bg=nc2)
 
-        self._nw = []
-        for btn in (self.btn_input, self.btn_output, self.btn_settings,
-                     self.btn_export, self.btn_export_all):
-            self._nw.append(
-                self.nav_cv.create_window(0, 10, window=btn, anchor="nw"))
         self._nw_toggle = self.nav_cv.create_window(
             0, 10, window=self.btn_theme, anchor="ne")
         self._nav_ftxt = self.nav_cv.create_text(
-            0, 27, anchor="w", font=FONT_UI,
+            12, 27, anchor="w", font=FONT_UI,
             fill=t["nav_text"], text="")
 
         self.nav_cv.bind("<Configure>", lambda e: self._on_nav_cfg())
@@ -480,14 +461,7 @@ class Annotator:
 
     def _repos_nav(self):
         """重新排列導覽列按鈕位置（RWD）。"""
-        x = 12
-        btns = (self.btn_input, self.btn_output, self.btn_settings,
-                self.btn_export, self.btn_export_all)
-        for i, btn in enumerate(btns):
-            btn.update_idletasks()
-            self.nav_cv.coords(self._nw[i], x, 10)
-            x += btn.winfo_reqwidth() + 8
-        self.nav_cv.coords(self._nav_ftxt, x + 8, 27)
+        self.nav_cv.coords(self._nav_ftxt, 12, 27)
         nw = self.nav_cv.winfo_width()
         self.nav_cv.coords(self._nw_toggle, nw - 12, 10)
 
@@ -503,14 +477,8 @@ class Annotator:
         nc1, nc2 = t["nav_start"], t["nav_end"]
 
         ol = t["btn_outline"]
-        for btn, outer in [(self.btn_input, nc1),
-                           (self.btn_output, nc1),
-                           (self.btn_settings, nc1),
-                           (self.btn_export, nc1),
-                           (self.btn_export_all, nc1),
-                           (self.btn_theme, nc2)]:
-            btn.recolor(t["btn_bg"], t["btn_fg"],
-                        t["btn_hover"], t["btn_active"], outer, ol)
+        self.btn_theme.recolor(t["btn_bg"], t["btn_fg"],
+                               t["btn_hover"], t["btn_active"], nc2, ol)
         self.btn_theme.set_text(t["toggle_label"])
 
         self.nav_cv.itemconfigure(self._nav_ftxt, fill=t["nav_text"])
@@ -542,18 +510,27 @@ class Annotator:
             ("<Right>", lambda e: self._step(1)),
             ("<Shift-Left>", lambda e: self._jump_start()),
             ("<Shift-Right>", lambda e: self._jump_end()),
+            ("<Home>", lambda e: self._jump_start()),
+            ("<End>", lambda e: self._jump_end()),
+            ("<Prior>", lambda e: self._prev_video()),
+            ("<Next>", lambda e: self._next_video()),
             ("<i>", lambda e: self._mark_start()),
             ("<o>", lambda e: self._mark_end()),
+            ("<I>", lambda e: self._mark_start()),
+            ("<O>", lambda e: self._mark_end()),
             ("<Return>", lambda e: self._save_segment()),
+            ("<KP_Enter>", lambda e: self._save_segment()),
             ("<p>", lambda e: self._capture_frame()),
+            ("<f>", lambda e: self._capture_frame()),
             ("<n>", lambda e: self._next_video()),
             ("<BackSpace>", lambda e: self._prev_video()),
             ("<Control-s>", lambda e: self._ctrl_save()),
+            ("<Control-Shift-S>", lambda e: self._show_segments()),
             ("<S>", lambda e: self._show_segments()),
             ("<Control-z>", lambda e: self._undo_segment()),
             ("<Control-e>", lambda e: self._export_segments()),
-            ("<Control-q>", lambda e: self._quit()),
-            ("<Escape>", lambda e: self._quit()),
+            ("<Control-q>", lambda e: self._on_close()),
+            ("<Escape>", lambda e: self._on_close()),
             ("<plus>", lambda e: self._zoom_step(1.2)),
             ("<KP_Add>", lambda e: self._zoom_step(1.2)),
             ("<equal>", lambda e: self._zoom_step(1.2)),
@@ -572,6 +549,150 @@ class Annotator:
             widget.bind("<ButtonPress-1>", self._on_drag_start)
             widget.bind("<B1-Motion>", self._on_drag_move)
             widget.bind("<ButtonRelease-1>", self._on_drag_end)
+
+    # ── Menu bar ────────────────────────────────────
+
+    def _build_menu(self):
+        """建立頂部下拉選單（依功能邏輯分類）。"""
+        menubar = tk.Menu(self.root, tearoff=0)
+
+        m_file = tk.Menu(menubar, tearoff=0)
+        m_file.add_command(label="輸入資料夾...",
+                           command=self._select_input)
+        m_file.add_command(label="輸出資料夾...",
+                           command=self._select_output)
+        m_file.add_separator()
+        m_file.add_command(label="設定...", command=self._open_settings)
+        m_file.add_separator()
+        m_file.add_command(label="離開", accelerator="Ctrl+Q",
+                           command=self._on_close)
+        menubar.add_cascade(label="檔案", menu=m_file)
+
+        m_edit = tk.Menu(menubar, tearoff=0)
+        m_edit.add_command(label="標記起點", accelerator="I",
+                           command=self._mark_start)
+        m_edit.add_command(label="標記終點", accelerator="O",
+                           command=self._mark_end)
+        m_edit.add_command(label="儲存目前區間", accelerator="Enter",
+                           command=self._save_segment)
+        m_edit.add_separator()
+        m_edit.add_command(label="復原上一筆", accelerator="Ctrl+Z",
+                           command=self._undo_segment)
+        m_edit.add_command(label="擷取目前畫面", accelerator="F / P",
+                           command=self._capture_frame)
+        menubar.add_cascade(label="編輯", menu=m_edit)
+
+        m_nav = tk.Menu(menubar, tearoff=0)
+        m_nav.add_command(label="前一幀", accelerator="A / Left",
+                          command=lambda: self._step(-1))
+        m_nav.add_command(label="後一幀", accelerator="D / Right",
+                          command=lambda: self._step(1))
+        m_nav.add_command(label="後退 30 幀", accelerator="W",
+                          command=lambda: self._step(-30))
+        m_nav.add_command(label="前進 30 幀", accelerator="S",
+                          command=lambda: self._step(30))
+        m_nav.add_separator()
+        m_nav.add_command(label="跳到開頭", accelerator="Home / Shift+A",
+                          command=self._jump_start)
+        m_nav.add_command(label="跳到結尾", accelerator="End / Shift+D",
+                          command=self._jump_end)
+        m_nav.add_separator()
+        m_nav.add_command(label="上一部影片", accelerator="PgUp / BS",
+                          command=self._prev_video)
+        m_nav.add_command(label="下一部影片", accelerator="PgDn / N",
+                          command=self._next_video)
+        menubar.add_cascade(label="瀏覽", menu=m_nav)
+
+        m_view = tk.Menu(menubar, tearoff=0)
+        m_view.add_command(label="放大", accelerator="+",
+                           command=lambda: self._zoom_step(1.2))
+        m_view.add_command(label="縮小", accelerator="-",
+                           command=lambda: self._zoom_step(1 / 1.2))
+        m_view.add_command(label="還原縮放", accelerator="0",
+                           command=self._zoom_reset)
+        m_view.add_separator()
+        m_view.add_command(label="切換日/夜主題",
+                           command=self._toggle_theme)
+        menubar.add_cascade(label="檢視", menu=m_view)
+
+        m_export = tk.Menu(menubar, tearoff=0)
+        m_export.add_command(label="寫入 CSV", accelerator="Ctrl+S",
+                             command=self._ctrl_save)
+        m_export.add_command(label="顯示暫存區間",
+                             accelerator="Ctrl+Shift+S",
+                             command=self._show_segments)
+        m_export.add_separator()
+        m_export.add_command(label="匯出目前影片", accelerator="Ctrl+E",
+                             command=self._export_segments)
+        m_export.add_command(label="匯出全部 CSV",
+                             command=self._export_all)
+        menubar.add_cascade(label="匯出", menu=m_export)
+
+        m_help = tk.Menu(menubar, tearoff=0)
+        m_help.add_command(label="快捷鍵說明",
+                           command=self._show_shortcuts)
+        menubar.add_cascade(label="說明", menu=m_help)
+
+        self.root.config(menu=menubar)
+
+    def _show_shortcuts(self):
+        messagebox.showinfo("快捷鍵說明", (__doc__ or "").strip())
+
+    # ── 自動儲存 / 未儲存檢查 ───────────────────────
+
+    def _has_unsaved(self):
+        return self._saved_count < len(self.segments)
+
+    def _auto_save_segments(self):
+        """將尚未寫入 CSV 的暫存區間追加寫入。失敗時回傳 False。"""
+        if not self.output_folder or not self.files:
+            return False
+        if not self._has_unsaved():
+            return True
+        csv_path = self._resolve_csv_path()
+        write_header = not os.path.exists(csv_path)
+        seg_counter = {}
+        # 以已儲存區間重建計數器，確保新增筆數編號延續
+        for fn, _, _ in self.segments[:self._saved_count]:
+            seg_counter[fn] = seg_counter.get(fn, 0) + 1
+        try:
+            with open(csv_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                if write_header:
+                    writer.writerow(
+                        ["filename", "segment", "start_us", "end_us"])
+                for fn, s, e in self.segments[self._saved_count:]:
+                    seg_counter[fn] = seg_counter.get(fn, 0) + 1
+                    writer.writerow([fn, seg_counter[fn], s, e])
+            self._saved_count = len(self.segments)
+            return True
+        except OSError:
+            return False
+
+    def _on_close(self):
+        """視窗關閉流程：若有未儲存標記則詢問是否儲存。"""
+        if self._has_unsaved():
+            resp = messagebox.askyesnocancel(
+                "尚未儲存",
+                f"目前有 {len(self.segments) - self._saved_count} "
+                f"筆標記尚未寫入 CSV，是否要儲存後離開？\n\n"
+                f"  是：寫入 CSV 並離開\n"
+                f"  否：直接離開（將遺失暫存標記）\n"
+                f"  取消：返回程式"
+            )
+            if resp is None:
+                return
+            if resp:
+                ok = self._auto_save_segments()
+                if not ok:
+                    if not messagebox.askyesno(
+                            "無法寫入",
+                            "未設定輸出資料夾或寫入失敗，"
+                            "暫存標記將遺失，確定要離開嗎？"):
+                        return
+        if self.cap:
+            self.cap.release()
+        self.root.destroy()
 
     # ── Settings dialog ─────────────────────────────
 
@@ -844,16 +965,20 @@ class Annotator:
         s = self.start_us if self.start_us is not None else "---"
         e = self.end_us if self.end_us is not None else "---"
         zoom_txt = f"{self.zoom:.2f}x" if self.zoom > 1.0 + 1e-6 else "1.00x"
+        pending = len(self.segments) - self._saved_count
+        seg_txt = f"{len(self.segments)}"
+        if pending > 0:
+            seg_txt = f"{len(self.segments)} (未存:{pending})"
         self.info_cv.itemconfigure(self._info_txt, text=(
             f"Frame: {self.frame_no}/{self.total_frames - 1}  |  "
             f"Time: {self._cached_us} us  |  "
             f"Start: {s}  |  End: {e}  |  "
-            f"Segments: {len(self.segments)}  |  Zoom: {zoom_txt}\n"
-            f"[A/D/Arrow]+-1  [W/S]+-30  [Shift+A/D]Head/Tail  "
-            f"[I]Start  [O]End  [Enter]Save  [P]Capture\n"
+            f"Segments: {seg_txt}  |  Zoom: {zoom_txt}\n"
+            f"[A/D/Arrow]+-1  [W/S]+-30  [Home/End]Head/Tail  "
+            f"[I]Start  [O]End  [Enter]Save  [F]Capture\n"
             f"[+/-/Wheel]Zoom  [Drag]Pan  [0]Reset  "
-            f"[Ctrl+Z]Undo  [Ctrl+S]Write  [Shift+S]View  "
-            f"[BS]Prev  [N]Next  [Ctrl+Q]Quit"))
+            f"[Ctrl+Z]Undo  [Ctrl+S]Write  [Ctrl+Shift+S]View  "
+            f"[PgUp/PgDn]Prev/Next  [Ctrl+Q]Quit"))
 
         cw = self.vframe.winfo_width()
         ch = self.vframe.winfo_height()
@@ -1144,6 +1269,8 @@ class Annotator:
         self.segments.append((fname, self.start_us, self.end_us))
         self.start_us = None
         self.end_us = None
+        # 自動寫入 CSV（若無輸出資料夾則維持暫存狀態）
+        self._auto_save_segments()
         self._display()
 
     # ── Capture frame ───────────────────────────────
@@ -1176,32 +1303,24 @@ class Annotator:
             csv_filename = DEFAULT_CSV_NAME
         return os.path.join(self.output_folder, csv_filename)
 
-    def _write_csv(self):
-        if not self.output_folder or not self.segments or not self.files:
-            return 0
-        csv_path = self._resolve_csv_path()
-        write_header = not os.path.exists(csv_path)
-
-        with open(csv_path, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            if write_header:
-                writer.writerow(["filename", "segment", "start_us", "end_us"])
-            seg_counter = {}
-            for fn, s, e in self.segments:
-                seg_counter[fn] = seg_counter.get(fn, 0) + 1
-                writer.writerow([fn, seg_counter[fn], s, e])
-        return len(self.segments)
-
     def _ctrl_save(self):
         if not self.segments:
             messagebox.showinfo("提示", "目前沒有暫存的標記區間")
             return
-        count = self._write_csv()
-        if count:
+        if not self._has_unsaved():
+            messagebox.showinfo(
+                "提示",
+                f"所有 {len(self.segments)} 筆區間皆已自動寫入\n"
+                f"{self._resolve_csv_path()}")
+            return
+        pending = len(self.segments) - self._saved_count
+        if self._auto_save_segments():
             messagebox.showinfo(
                 "已儲存",
-                f"已寫入 {count} 筆區間至\n{self._resolve_csv_path()}",
-            )
+                f"已寫入 {pending} 筆區間至\n{self._resolve_csv_path()}")
+        else:
+            messagebox.showerror(
+                "錯誤", "無法寫入 CSV，請確認已設定 Output Folder")
 
     def _show_segments(self):
         if not self.segments:
@@ -1217,6 +1336,12 @@ class Annotator:
 
     def _undo_segment(self):
         if not self.segments:
+            return
+        if len(self.segments) <= self._saved_count:
+            messagebox.showinfo(
+                "無法復原",
+                "最後一筆區間已自動寫入 CSV，無法復原。\n"
+                "若需刪除請直接編輯 CSV 檔案。")
             return
         removed = self.segments.pop()
         self.start_us = removed[1]
@@ -1553,9 +1678,7 @@ class Annotator:
         self._load_current_video()
 
     def _quit(self):
-        if self.cap:
-            self.cap.release()
-        self.root.destroy()
+        self._on_close()
 
 
 if __name__ == "__main__":
