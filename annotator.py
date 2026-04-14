@@ -1337,16 +1337,64 @@ class Annotator:
     def _undo_segment(self):
         if not self.segments:
             return
-        if len(self.segments) <= self._saved_count:
-            messagebox.showinfo(
-                "無法復原",
-                "最後一筆區間已自動寫入 CSV，無法復原。\n"
-                "若需刪除請直接編輯 CSV 檔案。")
-            return
+        was_saved = len(self.segments) <= self._saved_count
         removed = self.segments.pop()
+        if was_saved:
+            if not self._remove_last_csv_row(removed):
+                # 還原失敗則把區間放回記憶體，保持一致
+                self.segments.append(removed)
+                messagebox.showerror(
+                    "復原失敗",
+                    "無法從 CSV 移除該筆，請檢查檔案是否被佔用或手動編輯。")
+                return
+            self._saved_count = len(self.segments)
         self.start_us = removed[1]
         self.end_us = removed[2]
         self._display()
+
+    def _remove_last_csv_row(self, removed):
+        """從 CSV 移除最後一筆符合 removed=(fn, s_us, e_us) 的列，並重新編號。"""
+        csv_path = self._resolve_csv_path()
+        if not os.path.exists(csv_path):
+            return True
+        fn, s_us, e_us = removed
+        try:
+            with open(csv_path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                fields = reader.fieldnames or [
+                    "filename", "segment", "start_us", "end_us"]
+                rows = list(reader)
+        except OSError:
+            return False
+
+        target = None
+        for i in range(len(rows) - 1, -1, -1):
+            r = rows[i]
+            if (r.get("filename") == fn
+                    and str(r.get("start_us")) == str(s_us)
+                    and str(r.get("end_us")) == str(e_us)):
+                target = i
+                break
+        if target is None:
+            return True  # CSV 中已不存在該列，視為成功
+
+        del rows[target]
+        # 重新編號該 filename 的 segment 欄位
+        counter = {}
+        for r in rows:
+            key = r.get("filename", "")
+            counter[key] = counter.get(key, 0) + 1
+            if "segment" in r:
+                r["segment"] = counter[key]
+
+        try:
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(rows)
+            return True
+        except OSError:
+            return False
 
     # ── Export segments (ffmpeg) ────────────────────
 
